@@ -1,0 +1,43 @@
+name: Expensify job alerts
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore seen issues
+        uses: actions/cache@v4
+        with:
+          path: seen.txt
+          key: seen-${{ github.run_id }}
+          restore-keys: seen-
+
+      - name: Check for new jobs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          touch seen.txt
+          if [ -s seen.txt ]; then seed=false; else seed=true; fi
+
+          gh api -X GET search/issues \
+            -f q='repo:Expensify/App is:issue is:open label:"Help Wanted" label:External' \
+            -f sort=updated -f order=desc -f per_page=100 \
+            --jq '.items[] | [.number, .title, .html_url] | @tsv' |
+          while IFS=$'\t' read -r num title url; do
+            grep -qx "$num" seen.txt && continue
+            echo "$num" >> seen.txt
+            [ "$seed" = true ] && continue
+            curl -s "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TG_CHAT}" \
+              --data-urlencode "text=New Expensify job #${num}: ${title}
+          ${url}" > /dev/null
+          done
