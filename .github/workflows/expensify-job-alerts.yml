@@ -29,8 +29,8 @@ jobs:
           if [ -s seen.txt ]; then seed=false; else seed=true; fi
 
           gh api -X GET search/issues \
-            -f q='repo:Expensify/App is:issue is:open label:bug' \
-            -f sort=updated -f order=desc -f per_page=3 \
+            -f q='repo:Expensify/App is:issue is:open label:"Help Wanted" label:External' \
+            -f sort=updated -f order=desc -f per_page=100 \
             --jq '.items[] | [.number, .title, .html_url] | @tsv' |
           while IFS=$'\t' read -r num title url; do
             grep -qx "$num" seen.txt && continue
