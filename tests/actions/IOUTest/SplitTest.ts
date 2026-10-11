@@ -6841,6 +6841,200 @@ describe('updateSplitTransactions', () => {
         expect(updatedReportPreviewAction?.childVisibleActionCount).toEqual(2);
     });
 
+    it('should send plain string for comment in write parameters when splitting transaction', async () => {
+        // Given an expense report and original transaction
+        const {expenseReport, originalTransactionID} = await createBaseExpense();
+        if (!originalTransactionID || !expenseReport?.reportID) {
+            throw new Error('Missing original transaction data');
+        }
+
+        const writeSpy = jest.spyOn(APIlib, 'write');
+
+        // When splitting the transaction into two splits
+        await splitToTwo(expenseReport, originalTransactionID);
+
+        // Then API.write for SPLIT_TRANSACTION should contain string comments and not stringified objects
+        const splitCall = writeSpy.mock.calls.find(([command]) => command === WRITE_COMMANDS.SPLIT_TRANSACTION);
+        if (!splitCall) {
+            writeSpy.mockRestore();
+            throw new Error('Expected API.write call for splitting the transaction.');
+        }
+        writeSpy.mockRestore();
+
+        const [, params] = getRequiredWriteCall([splitCall], 0);
+        if (!isObject(params)) {
+            throw new Error('Expected split transaction params to be an object.');
+        }
+
+        expect(params['splits[0][comment]']).toBe('Split 1');
+        expect(params['splits[1][comment]']).toBe('Split 2');
+        expect(typeof params['splits[0][comment]']).toBe('string');
+        expect(params['splits[0][comment]']).not.toContain('{');
+    });
+
+    it('should call UPDATE_SPLIT_TRANSACTION and not REVERT_SPLIT_TRANSACTION when removing a split expense if another child split is rejected', async () => {
+        // Given an expense split into two child transactions where one child has been rejected
+        const {expenseReport, originalTransactionID} = await createBaseExpense();
+        if (!originalTransactionID || !expenseReport?.reportID) {
+            throw new Error('Missing original transaction data');
+        }
+        const {splitTransactionID1, splitTransactionID2} = await splitToTwo(expenseReport, originalTransactionID);
+
+        const violations: OnyxTypes.TransactionViolation[] = [
+            {
+                name: CONST.VIOLATIONS.AUTO_REPORTED_REJECTED_EXPENSE,
+                type: CONST.VIOLATION_TYPES.VIOLATION,
+            },
+        ];
+        await Onyx.merge(`${ONYXKEYS.COLLECTION.TRANSACTION_VIOLATIONS}${splitTransactionID2}`, violations);
+        await waitForBatchedUpdates();
+
+        const remainingSplitTransaction = await getOnyxValue(`${ONYXKEYS.COLLECTION.TRANSACTION}${splitTransactionID1}`);
+        const {allTransactions, allReports, allReportNameValuePairs, allReportActions} = await getCollections();
+        const allPolicyTags = await getAllPolicyTags();
+        const reports = getTransactionAndExpenseReports(expenseReport.reportID);
+        const splitExpenses: SplitExpense[] = [
+            {
+                transactionID: splitTransactionID1,
+                reportID: remainingSplitTransaction?.reportID,
+                amount: amount / 2,
+                created: DateUtils.getDBTime(),
+            },
+        ];
+
+        const writeSpy = jest.spyOn(APIlib, 'write');
+
+        // When updating split transactions removing the other split leaving 1 split
+        updateSplitTransactions({
+            isVendorMatchingBetaEnabled: false,
+            rules: undefined,
+            getCurrencyDecimals: getCurrencyDecimalsLocal,
+            getCurrencySymbol: getCurrencySymbolLocal,
+            allTransactionsList: allTransactions,
+            allReportsList: allReports,
+            allReportActionsList: allReportActions,
+            allReportNameValuePairsList: allReportNameValuePairs,
+            transactionData: {
+                reportID: expenseReport.reportID,
+                originalTransactionID,
+                splitExpenses,
+                splitExpensesTotal: undefined,
+            },
+            searchContext: {currentSearchHash: -2},
+            policyCategories: undefined,
+            policy: undefined,
+            policyRecentlyUsedCategories: [],
+            iouReport: expenseReport,
+            firstIOU: undefined,
+            isASAPSubmitBetaEnabled: false,
+            currentUserPersonalDetails,
+            transactionViolations: {
+                [`${ONYXKEYS.COLLECTION.TRANSACTION_VIOLATIONS}${splitTransactionID2}`]: violations,
+            },
+            policyRecentlyUsedCurrencies: [],
+            quickAction: undefined,
+            allPolicyTags,
+            personalDetails: {[RORY_ACCOUNT_ID]: {accountID: RORY_ACCOUNT_ID, login: RORY_EMAIL}},
+            transactionReport: reports.transactionReport,
+            expenseReport: reports.expenseReport,
+            isOffline: false,
+            delegateAccountID: undefined,
+            isTrackIntentUser: false,
+            formatPhoneNumber,
+        });
+        await waitForBatchedUpdates();
+
+        // Then REVERT_SPLIT_TRANSACTION should NOT be called, and UPDATE_SPLIT_TRANSACTION should be called
+        const revertCall = writeSpy.mock.calls.find(([command]) => command === WRITE_COMMANDS.REVERT_SPLIT_TRANSACTION);
+        const updateCall = writeSpy.mock.calls.find(([command]) => command === WRITE_COMMANDS.UPDATE_SPLIT_TRANSACTION);
+        writeSpy.mockRestore();
+
+        expect(revertCall).toBeUndefined();
+        expect(updateCall).toBeDefined();
+    });
+
+    it('should call UPDATE_SPLIT_TRANSACTION and not REVERT_SPLIT_TRANSACTION when removing a split expense if another child split is on a submitted report', async () => {
+        // Given an expense split into two child transactions where one child is on a submitted report
+        const {expenseReport, originalTransactionID} = await createBaseExpense();
+        if (!originalTransactionID || !expenseReport?.reportID) {
+            throw new Error('Missing original transaction data');
+        }
+        const {splitTransactionID1, splitTransactionID2} = await splitToTwo(expenseReport, originalTransactionID);
+
+        const submittedReportID = 'submitted-report-id-123';
+        const submittedReport: Report = {
+            ...createRandomReport(888, undefined),
+            reportID: submittedReportID,
+            statusNum: CONST.REPORT.STATUS_NUM.SUBMITTED,
+        };
+        await Onyx.merge(`${ONYXKEYS.COLLECTION.REPORT}${submittedReportID}`, submittedReport);
+        await Onyx.merge(`${ONYXKEYS.COLLECTION.TRANSACTION}${splitTransactionID2}`, {
+            reportID: submittedReportID,
+        });
+        await waitForBatchedUpdates();
+
+        const remainingSplitTransaction = await getOnyxValue(`${ONYXKEYS.COLLECTION.TRANSACTION}${splitTransactionID1}`);
+        const {allTransactions, allReports, allReportNameValuePairs, allReportActions} = await getCollections();
+        const allPolicyTags = await getAllPolicyTags();
+        const reports = getTransactionAndExpenseReports(expenseReport.reportID);
+        const splitExpenses: SplitExpense[] = [
+            {
+                transactionID: splitTransactionID1,
+                reportID: remainingSplitTransaction?.reportID,
+                amount: amount / 2,
+                created: DateUtils.getDBTime(),
+            },
+        ];
+
+        const writeSpy = jest.spyOn(APIlib, 'write');
+
+        // When updating split transactions removing the submitted split
+        updateSplitTransactions({
+            isVendorMatchingBetaEnabled: false,
+            rules: undefined,
+            getCurrencyDecimals: getCurrencyDecimalsLocal,
+            getCurrencySymbol: getCurrencySymbolLocal,
+            allTransactionsList: allTransactions,
+            allReportsList: allReports,
+            allReportActionsList: allReportActions,
+            allReportNameValuePairsList: allReportNameValuePairs,
+            transactionData: {
+                reportID: expenseReport.reportID,
+                originalTransactionID,
+                splitExpenses,
+                splitExpensesTotal: undefined,
+            },
+            searchContext: {currentSearchHash: -2},
+            policyCategories: undefined,
+            policy: undefined,
+            policyRecentlyUsedCategories: [],
+            iouReport: expenseReport,
+            firstIOU: undefined,
+            isASAPSubmitBetaEnabled: false,
+            currentUserPersonalDetails,
+            transactionViolations: {},
+            policyRecentlyUsedCurrencies: [],
+            quickAction: undefined,
+            allPolicyTags,
+            personalDetails: {[RORY_ACCOUNT_ID]: {accountID: RORY_ACCOUNT_ID, login: RORY_EMAIL}},
+            transactionReport: reports.transactionReport,
+            expenseReport: reports.expenseReport,
+            isOffline: false,
+            delegateAccountID: undefined,
+            isTrackIntentUser: false,
+            formatPhoneNumber,
+        });
+        await waitForBatchedUpdates();
+
+        // Then REVERT_SPLIT_TRANSACTION should NOT be called, and UPDATE_SPLIT_TRANSACTION should be called
+        const revertCall = writeSpy.mock.calls.find(([command]) => command === WRITE_COMMANDS.REVERT_SPLIT_TRANSACTION);
+        const updateCall = writeSpy.mock.calls.find(([command]) => command === WRITE_COMMANDS.UPDATE_SPLIT_TRANSACTION);
+        writeSpy.mockRestore();
+
+        expect(revertCall).toBeUndefined();
+        expect(updateCall).toBeDefined();
+    });
+
     it('should recompute parent child metadata from source comments when reverse split source thread metadata is stale', async () => {
         const {expenseReport, transactionThreadReportID, originalTransactionID} = await createBaseExpense();
 

@@ -44,6 +44,7 @@ import {
 } from '@libs/ReportUtils';
 import {
     getChildTransactions,
+    hasTransactionBeenRejected,
     hasValidModifiedAmount,
     isDistanceRequest as isDistanceRequestTransactionUtils,
     isOnHold,
@@ -168,20 +169,40 @@ function rescaleSnapshotGroupAmount<T extends OnyxTypes.Transaction>(transaction
 }
 
 /**
- * Whether any of the given splits still lives on a report that hasn't been submitted yet.
+ * Whether every given split still lives on a report that hasn't been submitted yet.
  */
 function hasEditableSplitExpenseLeft(
-    splitExpenses: SplitExpense[],
+    splitExpenses: Array<Pick<SplitExpense, 'transactionID' | 'reportID'> | undefined>,
     allTransactionsList: OnyxCollection<OnyxTypes.Transaction>,
     allReportsList: OnyxCollection<OnyxTypes.Report>,
     searchReportsData: SearchResultDataType | undefined,
+    transactionViolations?: OnyxCollection<OnyxTypes.TransactionViolation[]>,
 ): boolean {
-    return splitExpenses.some((expense) => {
+    if (splitExpenses.length === 0) {
+        return false;
+    }
+    return splitExpenses.every((expense) => {
+        if (!expense?.transactionID) {
+            return false;
+        }
         const transactionKey = `${ONYXKEYS.COLLECTION.TRANSACTION}${expense.transactionID}` as const;
         const liveReportID = allTransactionsList?.[transactionKey]?.reportID ?? searchReportsData?.[transactionKey]?.reportID ?? expense.reportID;
+        if (!liveReportID) {
+            return false;
+        }
+        const violations = transactionViolations?.[`${ONYXKEYS.COLLECTION.TRANSACTION_VIOLATIONS}${expense.transactionID}`];
+        if (hasTransactionBeenRejected(violations)) {
+            return false;
+        }
+        if (liveReportID === CONST.REPORT.UNREPORTED_REPORT_ID) {
+            return true;
+        }
         const reportKey = `${ONYXKEYS.COLLECTION.REPORT}${liveReportID}` as const;
-        const statusNum = allReportsList?.[reportKey]?.statusNum ?? searchReportsData?.[reportKey]?.statusNum ?? CONST.REPORT.STATUS_NUM.OPEN;
-        return statusNum < CONST.REPORT.STATUS_NUM.SUBMITTED;
+        const report = allReportsList?.[reportKey] ?? searchReportsData?.[reportKey];
+        if (!report) {
+            return false;
+        }
+        return (report.statusNum ?? CONST.REPORT.STATUS_NUM.OPEN) < CONST.REPORT.STATUS_NUM.SUBMITTED;
     });
 }
 
@@ -305,7 +326,7 @@ function updateSplitTransactions({
 
     const isCreationOfSplits = allChildTransactions.length === 0;
     const currentSnapshotDataForSplits = allSnapshots?.[`${ONYXKEYS.COLLECTION.SNAPSHOT}${searchContext?.currentSearchHash}`]?.data;
-    const hasEditableSplitExpensesLeft = hasEditableSplitExpenseLeft(splitExpenses, allTransactionsList, allReportsList, currentSnapshotDataForSplits);
+    const hasEditableSplitExpensesLeft = hasEditableSplitExpenseLeft(allChildTransactions, allTransactionsList, allReportsList, currentSnapshotDataForSplits, transactionViolations);
     const isReverseSplitOperation = splitExpenses.length === 1 && allChildTransactions.length > 0 && hasEditableSplitExpensesLeft;
 
     let splitThreadComments: OnyxTypes.ReportAction[] = [];
@@ -357,9 +378,7 @@ function updateSplitTransactions({
                 merchant: split?.merchant ?? '',
                 transactionID: split.transactionID,
                 reportID: split.reportID,
-                comment: {
-                    comment: currentDescription,
-                },
+                comment: currentDescription,
                 reimbursable: split?.reimbursable,
                 billable: split?.billable,
                 taxCode: split?.taxCode,
@@ -844,7 +863,7 @@ function updateSplitTransactions({
         if (splitTransaction) {
             const transactionChanges = {
                 ...currentSplit,
-                comment: currentSplit?.comment?.comment,
+                comment: currentSplit?.comment,
                 customUnitRateID: currentSplit?.customUnitRateID ?? CONST.CUSTOM_UNITS.FAKE_P2P_ID,
             } as TransactionChanges;
             delete transactionChanges.reportID;
@@ -2028,7 +2047,7 @@ function updateSplitTransactions({
     if (isReverseSplitOperation) {
         const parameters = {
             ...splits.at(0),
-            comment: splits.at(0)?.comment?.comment,
+            comment: splits.at(0)?.comment,
             waypoints: splits.at(0)?.waypoints ? JSON.stringify(splits.at(0)?.waypoints) : undefined,
             copiedComments: splits.at(0)?.copiedComments ? JSON.stringify(splits.at(0)?.copiedComments) : undefined,
         } as RevertSplitTransactionParams;
